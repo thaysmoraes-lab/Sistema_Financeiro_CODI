@@ -10,10 +10,11 @@ e Régua de Crédito.
 seu-repositorio/
 ├── app.py                      # o aplicativo Streamlit
 ├── requirements.txt            # dependências
+├── logo_codi.png               # logo CODI.COM exibida no app
 └── sistema_financeiro.xlsx     # seus dados (aba "Lançamentos" é a fonte)
 ```
 
-Os três arquivos precisam ficar na **raiz** do repositório.
+Os quatro arquivos precisam ficar na **raiz** do repositório.
 
 ## Como publicar no Streamlit Cloud (grátis)
 

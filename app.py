@@ -13,7 +13,29 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-st.set_page_config(page_title="Gestão Financeira", page_icon="📊", layout="wide")
+st.set_page_config(page_title="CODI.COM - Gestão Financeira", page_icon="📊", layout="wide")
+
+# ----------------- Tema CODI.COM (preto + dourado) -----------------
+DOURADO = "#D4B035"
+PRETO = "#1A1A1A"
+st.markdown(f"""
+<style>
+    .stApp {{ background-color: #FAFAF7; }}
+    h1, h2, h3 {{ color: {PRETO}; }}
+    h1 {{ border-bottom: 3px solid {DOURADO}; padding-bottom: 8px; }}
+    [data-testid="stSidebar"] {{ background-color: {PRETO}; }}
+    [data-testid="stSidebar"] * {{ color: #F5ECCB !important; }}
+    [data-testid="stMetricValue"] {{ color: {PRETO}; }}
+    .stRadio label, .stMultiSelect label, .stNumberInput label {{ color: {PRETO}; }}
+    div[data-testid="stMetric"] {{
+        background: #FFFFFF; border-left: 4px solid {DOURADO};
+        padding: 10px 14px; border-radius: 6px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }}
+    .stButton>button {{ background-color: {DOURADO}; color: {PRETO}; border: none; font-weight: 600; }}
+</style>
+""", unsafe_allow_html=True)
+
 
 ARQUIVO = "sistema_financeiro.xlsx"
 
@@ -69,7 +91,16 @@ def meses_ordenados(df):
 
 
 # ----------------- App -----------------
-st.title("📊 Sistema de Gestão Financeira")
+# Logo + título
+_lc1, _lc2 = st.columns([1, 4])
+with _lc1:
+    try:
+        st.image("logo_codi.png", width=200)
+    except Exception:
+        pass
+with _lc2:
+    st.title("Sistema de Gestão Financeira")
+    st.caption("CODI.COM · Jeans Wear")
 
 caminho = Path(ARQUIVO)
 if not caminho.exists():
