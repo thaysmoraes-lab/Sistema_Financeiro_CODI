@@ -241,19 +241,130 @@ elif aba == "DRE Gerencial":
     dre_df = pd.DataFrame([{"Descrição": d, "Valor": brl(v)} for d, v, _ in linhas])
     st.dataframe(dre_df, use_container_width=True, hide_index=True)
 
-    # DRE mês a mês (detalhada por categoria)
-    with st.expander("Ver DRE detalhada mês a mês"):
-        grupos = [("CMV", CUSTO), ("Desp. Operacionais", OPER),
-                  ("Desp. Pessoal", PESSOAL), ("Desp. Administrativas", admin_cats),
-                  ("Desp. Financeiras", FINANC), ("Retiradas de Sócios", RETIRADAS)]
-        rows = []
-        rows.append(["RECEITA"] + [rec_f[rec_f["MesK"] == m]["Valor"].sum() for m in meses_f])
-        for nome, cats in grupos:
-            rows.append([nome] + [soma_cat(cats, m) for m in meses_f])
-        det = pd.DataFrame(rows, columns=["Grupo"] + meses_f)
-        for m in meses_f:
-            det[m] = det[m].apply(brl)
-        st.dataframe(det, use_container_width=True, hide_index=True)
+    # ===== DRE mês a mês com Margem, EBITDA e Análise Horizontal =====
+    st.subheader("DRE mês a mês")
+
+    def rec_mes(m):
+        return rec_f[rec_f["MesK"] == m]["Valor"].sum()
+
+    # opção de expandir o plano de contas
+    expandir = st.checkbox("Expandir plano de contas (mostrar todas as categorias)", value=False)
+    mostrar_ah = st.checkbox("Mostrar análise horizontal (variação % entre meses)", value=True)
+
+    grupos = [("CUSTO (CMV)", CUSTO), ("Despesas Operacionais", OPER),
+              ("Despesas com Pessoal", PESSOAL), ("Despesas Administrativas", admin_cats),
+              ("Despesas Financeiras", FINANC), ("Retiradas de Sócios", RETIRADAS),
+              ("A Classificar", ACLASSIFICAR)]
+
+    linhas_det = []
+
+    # Receita
+    linhas_det.append(("(+) RECEITA BRUTA", [rec_mes(m) for m in meses_f], "res"))
+    # Impostos
+    linhas_det.append(("(-) Impostos e Comissões",
+                       [-sum(rec_mes(m) * a for _, a in TAXAS) for m in meses_f], "item"))
+    # Receita Líquida
+    rec_liq_m = [rec_mes(m) - sum(rec_mes(m) * a for _, a in TAXAS) for m in meses_f]
+    linhas_det.append(("(=) RECEITA LÍQUIDA", rec_liq_m, "res"))
+    # CMV
+    cmv_m = [soma_cat(CUSTO, m) for m in meses_f]
+    if expandir:
+        for cat in CUSTO:
+            linhas_det.append(("    " + cat, [soma_cat([cat], m) for m in meses_f], "cat"))
+    linhas_det.append(("(-) CMV", [-v for v in cmv_m], "item"))
+    # MARGEM
+    margem_m = [rec_liq_m[i] - cmv_m[i] for i in range(len(meses_f))]
+    linhas_det.append(("(=) MARGEM", margem_m, "res"))
+
+    # Grupos de despesa (operacional, pessoal, admin)
+    def grupo_total_m(cats, m):
+        return soma_cat(cats, m)
+
+    for nome, cats in [("Despesas Operacionais", OPER),
+                       ("Despesas com Pessoal", PESSOAL),
+                       ("Despesas Administrativas", admin_cats)]:
+        if expandir:
+            for cat in sorted(cats, key=lambda c: -soma_grupo([c])):
+                vals = [soma_cat([cat], m) for m in meses_f]
+                if any(vals):
+                    linhas_det.append(("    " + cat, [-v for v in vals], "cat"))
+        linhas_det.append((f"(-) {nome}",
+                           [-grupo_total_m(cats, m) for m in meses_f], "item"))
+
+    # EBITDA
+    ebitda_m = [margem_m[i]
+                - grupo_total_m(OPER, meses_f[i])
+                - grupo_total_m(PESSOAL, meses_f[i])
+                - grupo_total_m(admin_cats, meses_f[i])
+                for i in range(len(meses_f))]
+    linhas_det.append(("(=) EBITDA", ebitda_m, "res"))
+
+    # Financeiras, Retiradas, A Classificar
+    for nome, cats in [("Despesas Financeiras", FINANC),
+                       ("Retiradas de Sócios", RETIRADAS),
+                       ("A Classificar", ACLASSIFICAR)]:
+        if expandir:
+            for cat in sorted(cats, key=lambda c: -soma_grupo([c])):
+                vals = [soma_cat([cat], m) for m in meses_f]
+                if any(vals):
+                    linhas_det.append(("    " + cat, [-v for v in vals], "cat"))
+        linhas_det.append((f"(-) {nome}",
+                           [-grupo_total_m(cats, m) for m in meses_f], "item"))
+
+    # EBITDA FINAL
+    ef_m = [ebitda_m[i]
+            - grupo_total_m(FINANC, meses_f[i])
+            - grupo_total_m(RETIRADAS, meses_f[i])
+            - grupo_total_m(ACLASSIFICAR, meses_f[i])
+            for i in range(len(meses_f))]
+    linhas_det.append(("(=) EBITDA FINAL", ef_m, "res"))
+
+    # montar DataFrame
+    col_nome = "Descrição"
+    dados = {}
+    dados[col_nome] = [l[0] for l in linhas_det]
+    for i, m in enumerate(meses_f):
+        dados[m] = [l[1][i] for l in linhas_det]
+    dados["TOTAL"] = [sum(l[1]) for l in linhas_det]
+    # análise horizontal: variação % do último mês vs penúltimo
+    if mostrar_ah and len(meses_f) >= 2:
+        ah = []
+        for l in linhas_det:
+            ant, ult = l[1][-2], l[1][-1]
+            if ant != 0:
+                ah.append((ult - ant) / abs(ant))
+            else:
+                ah.append(None)
+        dados[f"AH% ({meses_f[-1]} vs {meses_f[-2]})"] = ah
+
+    det = pd.DataFrame(dados)
+
+    # formatação: moeda nas colunas de mês e total; % na AH
+    ah_col = f"AH% ({meses_f[-1]} vs {meses_f[-2]})" if (mostrar_ah and len(meses_f) >= 2) else None
+    fmt = det.copy()
+    for c in fmt.columns:
+        if c == col_nome:
+            continue
+        if c == ah_col:
+            fmt[c] = fmt[c].apply(lambda v: "" if v is None else f"{v*100:+.1f}%")
+        else:
+            fmt[c] = fmt[c].apply(brl)
+
+    # destacar linhas de resultado
+    def realcar(row):
+        desc = row[col_nome]
+        if desc.startswith("(="):
+            return ["background-color: #1A1A1A; color: white; font-weight: bold"] * len(row)
+        if desc.strip().startswith("(-)") or desc.strip().startswith("(+)"):
+            return ["background-color: #F5ECCB; font-weight: bold"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(fmt.style.apply(realcar, axis=1), use_container_width=True,
+                 hide_index=True, height=min(640, 40 + 35 * len(fmt)))
+
+    if mostrar_ah:
+        st.caption(f"AH% = variação percentual de {meses_f[-1]} em relação a {meses_f[-2]}. "
+                   f"Verde/+ subiu, vermelho/- caiu.")
 
 # ============ SIMULADOR DE COMPRA ============
 elif aba == "Simulador de Compra":
