@@ -45,12 +45,13 @@ OPER = ["Facção", "Tecidos", "Lavanderia", "Acabamento Externo", "Aviamento", 
         "Criação de Modelos", "Etiquetas", "Frete e Transporte de Mercadorias", "Produção Externa",
         "Bordado Industrial", "Bordado Manual", "Outros Insumos", "Embalagens",
         "Manutenção de Máquinas e Peças"]
-PESSOAL = ["Salário e Ordenados", "Acertos e Recisões", "Férias", "Fgts, Gps e Pis", "Vale Transporte",
+PESSOAL = ["Salário e Ordenados", "13º Salário", "Acertos e Recisões", "Férias", "Fgts, Gps e Pis", "Vale Transporte",
            "Vales e Adiantamentos", "Premiações e Abonos", "Exame Adminissional/Demissional",
            "Uniforme e EPIs", "Despesa com Sindicatos"]
-FINANC = ["Empréstimos", "Juros de Empréstimos", "Tarifas e Custos de Op. Bancárias", "Consórcio",
+FINANC = ["Empréstimos", "Empréstimos a Terceiros", "ICMS", "Juros de Empréstimos", "Tarifas e Custos de Op. Bancárias", "Consórcio",
           "Darf", "Outros Tributos", "Multas", "Multas e Juros por Atraso", "Ipva"]
 RETIRADAS = ["Retiradas de Sócios"]
+ACLASSIFICAR = ["Despesa não Identificada", "Suspenso (a classificar)"]
 
 TAXAS = [("Simples Nacional (10,47% s/ Vendas)", 0.1047),
          ("Comissão de Vendedores (1,50% s/ Vendas)", 0.0150),
@@ -59,14 +60,10 @@ TAXAS = [("Simples Nacional (10,47% s/ Vendas)", 0.1047),
 
 # ----------------- Leitura e preparo dos dados -----------------
 @st.cache_data
-def carregar(caminho):
-    """Lê a aba Lançamentos e normaliza."""
-    df = pd.read_excel(caminho, sheet_name="Lançamentos", skiprows=4)
-    # colunas: Data, Descrição, Tipo, Categoria, Valor (R$), Mês, Conferido?
-    df = df.rename(columns={
-        "Valor (R$)": "Valor",
-        "Conferido?": "Conferido",
-    })
+def carregar_aba(caminho, aba):
+    """Lê uma aba de lançamentos e normaliza."""
+    df = pd.read_excel(caminho, sheet_name=aba, skiprows=4)
+    df = df.rename(columns={"Valor (R$)": "Valor"})
     df = df.dropna(subset=["Data", "Tipo", "Categoria", "Valor"])
     df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
     df = df.dropna(subset=["Data"])
@@ -108,11 +105,17 @@ if not caminho.exists():
              f"Coloque o Excel junto do app.py.")
     st.stop()
 
-df = carregar(ARQUIVO)
-meses = meses_ordenados(df)
+df_dre = carregar_aba(ARQUIVO, "Lançamentos DRE")      # competência (vencimento)
+df_flux = carregar_aba(ARQUIVO, "Lançamentos Fluxo")    # caixa (baixa)
 
-receita = df[df["Tipo"] == "Entrada"]
-despesa = df[df["Tipo"] == "Saída"]
+# CMV reaproveitado entra na base DRE se não houver categoria CMV
+# (já vem nas duas abas conforme gerado no Excel)
+
+receita = df_dre[df_dre["Tipo"] == "Entrada"]      # para DRE
+despesa = df_dre[df_dre["Tipo"] == "Saída"]
+receita_fx = df_flux[df_flux["Tipo"] == "Entrada"]  # para Fluxo
+despesa_fx = df_flux[df_flux["Tipo"] == "Saída"]
+meses = meses_ordenados(df_dre)
 
 # Sidebar - filtro de período
 st.sidebar.header("Filtros")
@@ -151,13 +154,22 @@ if aba == "Resumo":
 # ============ FLUXO DE CAIXA ============
 elif aba == "Fluxo de Caixa":
     st.header("Fluxo de Caixa Mensal")
+    st.caption("Regime de caixa (data de baixa)")
     saldo_ini = st.number_input("Saldo inicial (R$)", value=0.0, step=1000.0)
 
+    # Fluxo usa a base CAIXA (data de baixa)
+    meses_fx = meses_ordenados(df_flux)
+    if sel:
+        rec_fx_f = receita_fx[receita_fx["MesK"].isin(sel)]
+        desp_fx_f = despesa_fx[despesa_fx["MesK"].isin(sel)]
+        meses_fx = [m for m in meses_fx if m in sel]
+    else:
+        rec_fx_f, desp_fx_f = receita_fx, despesa_fx
     linhas = []
     acum = saldo_ini
-    for m in meses_f:
-        ent = rec_f[rec_f["MesK"] == m]["Valor"].sum()
-        sai = desp_f[desp_f["MesK"] == m]["Valor"].sum()
+    for m in meses_fx:
+        ent = rec_fx_f[rec_fx_f["MesK"] == m]["Valor"].sum()
+        sai = desp_fx_f[desp_fx_f["MesK"] == m]["Valor"].sum()
         res = ent - sai
         acum += res
         linhas.append({"Mês": m, "Entradas": ent, "Saídas": sai,
@@ -176,7 +188,8 @@ elif aba == "Fluxo de Caixa":
 
 # ============ DRE GERENCIAL ============
 elif aba == "DRE Gerencial":
-    st.header("DRE Gerencial")
+    st.header("DRE Gerencial — Competência")
+    st.caption("Regime de competência (data de vencimento)")
 
     def soma_cat(cats, m):
         return desp_f[(desp_f["Categoria"].isin(cats)) & (desp_f["MesK"] == m)]["Valor"].sum()
@@ -194,13 +207,14 @@ elif aba == "DRE Gerencial":
     margem = rec_liq - cmv
     t_oper = soma_grupo(OPER)
     t_pess = soma_grupo(PESSOAL)
-    classific = set(CUSTO + OPER + PESSOAL + FINANC + RETIRADAS)
+    classific = set(CUSTO + OPER + PESSOAL + FINANC + RETIRADAS + ACLASSIFICAR)
     admin_cats = sorted(set(desp_f["Categoria"]) - classific)
     t_admin = desp_f[desp_f["Categoria"].isin(admin_cats)]["Valor"].sum()
     ebitda = margem - t_oper - t_pess - t_admin
     t_fin = soma_grupo(FINANC)
     t_ret = soma_grupo(RETIRADAS)
-    ebitda_final = ebitda - t_fin - t_ret
+    t_aclass = soma_grupo(ACLASSIFICAR)
+    ebitda_final = ebitda - t_fin - t_ret - t_aclass
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Receita Líquida", brl(rec_liq))
@@ -221,6 +235,7 @@ elif aba == "DRE Gerencial":
         ("(=) EBITDA", ebitda, "res"),
         ("(-) Despesas Financeiras", -t_fin, "item"),
         ("(-) Retiradas de Sócios", -t_ret, "item"),
+        ("(-) A Classificar", -t_aclass, "item"),
         ("(=) EBITDA FINAL", ebitda_final, "res"),
     ]
     dre_df = pd.DataFrame([{"Descrição": d, "Valor": brl(v)} for d, v, _ in linhas])
