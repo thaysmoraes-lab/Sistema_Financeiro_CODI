@@ -121,12 +121,12 @@ meses = meses_ordenados(df_dre)
 st.sidebar.header("Filtros")
 sel = st.sidebar.multiselect("Meses", meses, default=meses)
 if sel:
-    df_f = df[df["MesK"].isin(sel)]
+    df_f = df_dre[df_dre["MesK"].isin(sel)]
     rec_f = receita[receita["MesK"].isin(sel)]
     desp_f = despesa[despesa["MesK"].isin(sel)]
     meses_f = [m for m in meses if m in sel]
 else:
-    df_f, rec_f, desp_f, meses_f = df, receita, despesa, meses
+    df_f, rec_f, desp_f, meses_f = df_dre, receita, despesa, meses
 
 aba = st.sidebar.radio("Seção", ["Resumo", "Fluxo de Caixa", "DRE Gerencial",
                                   "Simulador de Compra", "Régua de Crédito"])
