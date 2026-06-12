@@ -41,10 +41,8 @@ ARQUIVO = "sistema_financeiro.xlsx"
 
 # ----------------- Classificação da DRE gerencial -----------------
 CUSTO = ["Custo de Mercadoria Vendida"]
-OPER = ["Facção", "Tecidos", "Lavanderia", "Acabamento Externo", "Aviamento", "Travete",
-        "Criação de Modelos", "Etiquetas", "Frete e Transporte de Mercadorias", "Produção Externa",
-        "Bordado Industrial", "Bordado Manual", "Outros Insumos", "Embalagens",
-        "Manutenção de Máquinas e Peças"]
+OPER = ["Criação de Modelos", "Etiquetas", "Frete e Transporte de Mercadorias",
+        "Embalagens", "Manutenção de Máquinas e Peças"]
 PESSOAL = ["Salário e Ordenados", "13º Salário", "Acertos e Recisões", "Férias", "Fgts, Gps e Pis", "Vale Transporte",
            "Vales e Adiantamentos", "Premiações e Abonos", "Exame Adminissional/Demissional",
            "Uniforme e EPIs", "Despesa com Sindicatos"]
@@ -250,6 +248,7 @@ elif aba == "DRE Gerencial":
     # opção de expandir o plano de contas
     expandir = st.checkbox("Expandir plano de contas (mostrar todas as categorias)", value=False)
     mostrar_ah = st.checkbox("Mostrar análise horizontal (variação % entre meses)", value=True)
+    mostrar_av = st.checkbox("Mostrar análise vertical (% sobre a Receita Bruta)", value=True)
 
     grupos = [("CUSTO (CMV)", CUSTO), ("Despesas Operacionais", OPER),
               ("Despesas com Pessoal", PESSOAL), ("Despesas Administrativas", admin_cats),
@@ -336,17 +335,30 @@ elif aba == "DRE Gerencial":
             else:
                 ah.append(None)
         dados[f"AH% ({meses_f[-1]} vs {meses_f[-2]})"] = ah
+    # análise vertical: cada linha como % da Receita Bruta total
+    if mostrar_av:
+        rec_bruta_total = sum(linhas_det[0][1])  # primeira linha = RECEITA BRUTA
+        av = []
+        for l in linhas_det:
+            if rec_bruta_total != 0:
+                av.append(sum(l[1]) / rec_bruta_total)
+            else:
+                av.append(None)
+        dados["AV% s/ Receita"] = av
 
     det = pd.DataFrame(dados)
 
-    # formatação: moeda nas colunas de mês e total; % na AH
+    # formatação: moeda nas colunas de mês e total; % na AH e AV
     ah_col = f"AH% ({meses_f[-1]} vs {meses_f[-2]})" if (mostrar_ah and len(meses_f) >= 2) else None
+    av_col = "AV% s/ Receita" if mostrar_av else None
     fmt = det.copy()
     for c in fmt.columns:
         if c == col_nome:
             continue
         if c == ah_col:
             fmt[c] = fmt[c].apply(lambda v: "" if v is None else f"{v*100:+.1f}%")
+        elif c == av_col:
+            fmt[c] = fmt[c].apply(lambda v: "" if v is None else f"{v*100:.1f}%")
         else:
             fmt[c] = fmt[c].apply(brl)
 
@@ -365,76 +377,186 @@ elif aba == "DRE Gerencial":
     if mostrar_ah:
         st.caption(f"AH% = variação percentual de {meses_f[-1]} em relação a {meses_f[-2]}. "
                    f"Verde/+ subiu, vermelho/- caiu.")
+    if mostrar_av:
+        st.caption("AV% = peso de cada linha sobre a Receita Bruta total do período "
+                   "(análise vertical).")
 
 # ============ SIMULADOR DE COMPRA ============
 elif aba == "Simulador de Compra":
-    st.header("Simulador de Compra Parcelada")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Dados da compra")
-        valor = st.number_input("Valor do produto (R$)", value=50000.0, step=1000.0)
-        entrada = st.number_input("Entrada / sinal (R$)", value=5000.0, step=500.0)
-        nparc = st.number_input("Número de parcelas", value=12, min_value=1, step=1)
-        juros = st.number_input("Taxa de juros ao mês (%)", value=1.8, step=0.1) / 100
-    with col2:
-        st.subheader("Sua capacidade de pagamento")
-        rec_m = st.number_input("Receita mensal média (R$)", value=60000.0, step=1000.0)
-        desp_m = st.number_input("Despesas fixas mensais (R$)", value=40000.0, step=1000.0)
-        pct = st.number_input("% da sobra que pode comprometer", value=30, step=5) / 100
-        # média mensal por categoria (parcelas já ativas)
-        media_cat = (despesa.groupby("Categoria")
-                     .apply(lambda g: g["Valor"].sum() / g["MesK"].nunique())
-                     .sort_index())
-        cat_sel = st.selectbox("Parcelas já ativas - categoria",
-                               ["(nenhuma)"] + list(media_cat.index))
-        comprometido = media_cat.get(cat_sel, 0.0) if cat_sel != "(nenhuma)" else 0.0
-        st.caption(f"Parcelas já comprometidas/mês: **{brl(comprometido)}**")
+    st.header("Compras Parceladas — Contas a Pagar")
+    st.caption("Lance uma compra parcelada: o sistema gera as parcelas mês a mês "
+               "e soma no dashboard de contas a pagar.")
 
-    financiado = valor - entrada
-    if juros == 0:
-        parcela = financiado / nparc
-    else:
-        parcela = financiado * (juros * (1 + juros) ** nparc) / ((1 + juros) ** nparc - 1)
-    total_pago = entrada + parcela * nparc
-    custo_juros = total_pago - valor
-    limite = (rec_m - desp_m) * pct - comprometido
+    # ---- base de contas a pagar (aba do Excel) ----
+    @st.cache_data
+    def carregar_contas(caminho):
+        df = pd.read_excel(caminho, sheet_name="Contas a Pagar", skiprows=4)
+        df = df.rename(columns={"Valor (R$)": "Valor"})
+        df = df.dropna(subset=["Fornecedor", "Vencimento", "Valor"])
+        df["Vencimento"] = pd.to_datetime(df["Vencimento"], errors="coerce")
+        df = df.dropna(subset=["Vencimento"])
+        df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce").fillna(0)
+        return df
+
+    try:
+        base = carregar_contas(ARQUIVO)
+    except Exception:
+        base = pd.DataFrame(columns=["Fornecedor", "Vencimento", "Parcelas",
+                                     "Forma de Pagamento", "Valor", "Descrição", "Status"])
+
+    # ---- estado: novas parcelas lançadas nesta sessão ----
+    if "novas_parcelas" not in st.session_state:
+        st.session_state["novas_parcelas"] = []
+
+    # ---- formulário de lançamento ----
+    st.subheader("Lançar nova compra parcelada")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        fornecedor = st.text_input("Fornecedor")
+        valor_total = st.number_input("Valor total (R$)", min_value=0.0,
+                                      value=10000.0, step=500.0)
+    with c2:
+        data1 = st.date_input("Data da 1ª parcela")
+        nparc = st.number_input("Nº de parcelas", min_value=1, max_value=60,
+                                value=3, step=1)
+    with c3:
+        forma = st.selectbox("Forma de pagamento",
+                             ["CHEQUE - EMPRESA", "CHEQUE - CLIENTE/TERCEIROS",
+                              "BOLETO", "PIX", "CARTÃO", "DINHEIRO"])
+        descricao = st.text_input("Descrição", value="")
+
+    cga, cgb = st.columns([1, 1])
+    gerar = cga.button("➕ Gerar parcelas", type="primary",
+                       use_container_width=True)
+    limpar = cgb.button("🗑️ Limpar lançamentos da sessão",
+                        use_container_width=True)
+    if limpar:
+        st.session_state["novas_parcelas"] = []
+        st.rerun()
+
+    if gerar:
+        if not fornecedor.strip():
+            st.warning("Informe o fornecedor antes de gerar.")
+        elif valor_total <= 0:
+            st.warning("Informe um valor total maior que zero.")
+        else:
+            vparc = round(valor_total / nparc, 2)
+            base_dt = pd.Timestamp(data1)
+            for i in range(int(nparc)):
+                venc = base_dt + pd.DateOffset(months=i)
+                st.session_state["novas_parcelas"].append({
+                    "Parcela": f"{i+1}/{int(nparc)}",
+                    "Fornecedor": fornecedor.strip(),
+                    "Vencimento": venc,
+                    "Parcelas": int(nparc),
+                    "Forma de Pagamento": forma,
+                    "Valor": vparc,
+                    "Descrição": descricao.strip(),
+                    "Status": "A PAGAR",
+                })
+            st.success(f"{int(nparc)} parcela(s) de {brl(vparc)} geradas "
+                       f"para {fornecedor.strip()}.")
+
+    novas = pd.DataFrame(st.session_state["novas_parcelas"])
+
+    # ---- parcelas geradas nesta sessão ----
+    if not novas.empty:
+        st.subheader("Parcelas geradas nesta sessão")
+        show_novas = novas.copy()
+        show_novas["Vencimento"] = pd.to_datetime(show_novas["Vencimento"]).dt.strftime("%d/%m/%Y")
+        show_novas["Valor"] = show_novas["Valor"].apply(brl)
+        st.dataframe(show_novas, use_container_width=True, hide_index=True)
+        csv = novas.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ Baixar parcelas geradas (CSV)", csv,
+                           file_name="parcelas_geradas.csv", mime="text/csv")
 
     st.divider()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Parcela mensal", brl(parcela))
-    c2.metric("Total pago", brl(total_pago))
-    c3.metric("Custo dos juros", brl(custo_juros))
-    c4, c5 = st.columns(2)
-    c4.metric("Limite disponível", brl(limite))
-    c5.metric("Comprometido/mês", brl(comprometido))
 
-    if parcela <= limite:
-        st.success(f"✅ APROVADO — a parcela cabe no seu limite. "
-                   f"Folga de {brl(limite - parcela)} por mês.")
+    # ---- dashboard: totais por mês (base + novas) ----
+    st.subheader("Dashboard — Resumo de contas a pagar")
+    df_dash = base[["Fornecedor", "Vencimento", "Valor"]].copy()
+    if not novas.empty:
+        df_dash = pd.concat([df_dash,
+                             novas[["Fornecedor", "Vencimento", "Valor"]]],
+                            ignore_index=True)
+    if df_dash.empty:
+        st.info("Nenhuma conta a pagar na base. Lance uma compra acima.")
     else:
-        st.error(f"❌ NÃO RECOMENDADO — a parcela ultrapassa seu limite em "
-                 f"{brl(parcela - limite)} por mês.")
+        df_dash["Vencimento"] = pd.to_datetime(df_dash["Vencimento"])
+        df_dash["Mes"] = df_dash["Vencimento"].dt.strftime("%m/%Y")
+        df_dash["MesOrd"] = (df_dash["Vencimento"].dt.year * 100
+                             + df_dash["Vencimento"].dt.month)
+        tot_geral = df_dash["Valor"].sum()
+        st.metric("TOTAL GERAL A PAGAR", brl(tot_geral))
+        piv = (df_dash.groupby(["MesOrd", "Mes"])["Valor"].sum()
+               .reset_index().sort_values("MesOrd"))
+        cols = st.columns(min(6, max(1, len(piv))))
+        for i, (_, row) in enumerate(piv.iterrows()):
+            cols[i % len(cols)].metric(f"Total {row['Mes']}", brl(row["Valor"]))
+        st.bar_chart(piv.set_index("Mes")["Valor"])
 
-# ============ RÉGUA DE CRÉDITO ============
+        # tabela completa de contas a pagar
+        with st.expander("Ver todas as contas a pagar (base + novas)"):
+            full = base.copy()
+            if not novas.empty:
+                add = novas.rename(columns={"Parcela": "Parc."})
+                full = pd.concat([full, add[["Fornecedor", "Vencimento", "Parcelas",
+                                             "Forma de Pagamento", "Valor",
+                                             "Descrição", "Status"]]],
+                                 ignore_index=True)
+            full = full.sort_values("Vencimento")
+            full["Vencimento"] = pd.to_datetime(full["Vencimento"]).dt.strftime("%d/%m/%Y")
+            full["Valor"] = full["Valor"].apply(brl)
+            st.dataframe(full, use_container_width=True, hide_index=True)
+
+    st.caption("As novas parcelas valem só nesta sessão (o app não grava no Excel). "
+               "Use o botão de download para salvar e colar na aba 'Contas a Pagar'.")
+
 elif aba == "Régua de Crédito":
     st.header("Régua de Crédito")
-    st.write("Responda às perguntas. O sistema soma os pontos e decide a liberação.")
+    st.write("Responda às perguntas. Os critérios marcados com 🔴 são "
+             "**determinantes**: se a resposta for Não, o crédito é negado "
+             "na hora, independente da pontuação.")
+
+    # (pergunta, peso, eliminatória?)
     perguntas = [
-        ("O cliente já comprou com a gente antes?", 15),
-        ("Os pagamentos anteriores foram em dia?", 25),
-        ("Possui CNPJ ativo / cadastro regular?", 15),
-        ("Está com o nome limpo (sem SPC/Serasa)?", 25),
-        ("Apresentou comprovante de renda/faturamento?", 10),
-        ("O valor pedido está dentro do histórico dele?", 10),
+        ("O cliente já comprou com a gente antes?", 15, False),
+        ("🔴 Os pagamentos anteriores foram em dia?", 25, True),
+        ("🔴 Possui CNPJ ativo / cadastro regular?", 15, True),
+        ("🔴 Está com o nome limpo (sem SPC/Serasa)?", 25, True),
+        ("Apresentou comprovante de renda/faturamento?", 10, False),
+        ("O valor pedido está dentro do histórico dele?", 10, False),
     ]
+
     total = 0
-    for q, peso in perguntas:
-        resp = st.radio(q, ["Não", "Sim"], horizontal=True, key=q)
-        if resp == "Sim":
-            total += peso
+    eliminado_por = []
+    for q, peso, elim in perguntas:
+        if "pagamentos anteriores" in q:
+            # cliente novo não tem histórico: opção neutra
+            resp = st.radio(q, ["Não", "Sim", "Não se aplica (cliente novo)"],
+                            horizontal=True, key=q)
+            if resp == "Sim":
+                total += peso
+            elif resp == "Não":
+                eliminado_por.append("Pagamentos anteriores em atraso")
+        else:
+            resp = st.radio(q, ["Não", "Sim"], horizontal=True, key=q)
+            if resp == "Sim":
+                total += peso
+            elif elim:
+                if "CNPJ" in q:
+                    eliminado_por.append("CNPJ inativo / cadastro irregular")
+                elif "nome limpo" in q:
+                    eliminado_por.append("Restrição no SPC/Serasa")
+
     st.divider()
     st.metric("Pontuação total", f"{total}/100")
-    if total >= 80:
+
+    if eliminado_por:
+        motivos = "; ".join(eliminado_por)
+        st.error(f"⛔ CRÉDITO NEGADO — critério determinante: {motivos}. "
+                 f"A negativa é imediata, independente da pontuação.")
+    elif total >= 80:
         st.success(f"✅ CRÉDITO LIBERADO ({total}/100) — perfil de baixo risco.")
     elif total >= 50:
         st.warning(f"⚠️ LIBERAR COM CAUTELA ({total}/100) — exigir entrada ou reduzir prazo.")
@@ -442,4 +564,4 @@ elif aba == "Régua de Crédito":
         st.error(f"❌ CRÉDITO NEGADO ({total}/100) — risco alto.")
 
 st.sidebar.divider()
-st.sidebar.caption("Dados lidos da aba 'Lançamentos'. Tudo recalculado ao vivo.")
+st.sidebar.caption("Dados: DRE (competência) e Fluxo (caixa). Recalculado ao vivo.")
