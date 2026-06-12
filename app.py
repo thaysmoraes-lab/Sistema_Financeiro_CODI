@@ -383,134 +383,139 @@ elif aba == "DRE Gerencial":
 
 # ============ SIMULADOR DE COMPRA ============
 elif aba == "Simulador de Compra":
-    st.header("Compras Parceladas — Contas a Pagar")
-    st.caption("Lance uma compra parcelada: o sistema gera as parcelas mês a mês "
-               "e soma no dashboard de contas a pagar.")
+    st.header("Simulador de Compra Parcelada")
+    st.caption("Base: contas a pagar dos próximos 3 meses. "
+               "Limite: média mensal paga nos últimos 6 meses.")
 
-    # ---- base de contas a pagar (aba do Excel) ----
+    # ---- contas a pagar (títulos em aberto, base real) ----
     @st.cache_data
     def carregar_contas(caminho):
         df = pd.read_excel(caminho, sheet_name="Contas a Pagar", skiprows=4)
         df = df.rename(columns={"Valor (R$)": "Valor"})
-        df = df.dropna(subset=["Fornecedor", "Vencimento", "Valor"])
+        df = df.dropna(subset=["Vencimento", "Valor"])
         df["Vencimento"] = pd.to_datetime(df["Vencimento"], errors="coerce")
         df = df.dropna(subset=["Vencimento"])
         df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce").fillna(0)
         return df
 
-    try:
-        base = carregar_contas(ARQUIVO)
-    except Exception:
-        base = pd.DataFrame(columns=["Fornecedor", "Vencimento", "Parcelas",
-                                     "Forma de Pagamento", "Valor", "Descrição", "Status"])
+    contas = carregar_contas(ARQUIVO)
 
-    # ---- estado: novas parcelas lançadas nesta sessão ----
-    if "novas_parcelas" not in st.session_state:
-        st.session_state["novas_parcelas"] = []
+    hoje = pd.Timestamp.today().normalize()
+    fim_3m = hoje + pd.DateOffset(months=3)
 
-    # ---- formulário de lançamento ----
-    st.subheader("Lançar nova compra parcelada")
+    # ---- BASE: parcelas a pagar nos próximos 3 meses ----
+    prox = contas[(contas["Vencimento"] >= hoje) & (contas["Vencimento"] < fim_3m)]
+    comprometido_3m = prox["Valor"].sum()
+    comprometido_mensal = comprometido_3m / 3
+
+    # ---- LIMITE: média mensal paga nos últimos 6 meses (base caixa) ----
+    pagos = despesa_fx.copy()
+    meses_pagos = (pagos[["MesK", "MesOrd"]].drop_duplicates()
+                   .sort_values("MesOrd").tail(6))
+    ult6 = pagos[pagos["MesK"].isin(meses_pagos["MesK"])]
+    media_6m = ult6.groupby("MesK")["Valor"].sum().mean() if not ult6.empty else 0.0
+
+    limite_disponivel = media_6m - comprometido_mensal
+
+    # ---- painel de situação ----
     c1, c2, c3 = st.columns(3)
-    with c1:
-        fornecedor = st.text_input("Fornecedor")
-        valor_total = st.number_input("Valor total (R$)", min_value=0.0,
-                                      value=10000.0, step=500.0)
-    with c2:
-        data1 = st.date_input("Data da 1ª parcela")
-        nparc = st.number_input("Nº de parcelas", min_value=1, max_value=60,
-                                value=3, step=1)
-    with c3:
-        forma = st.selectbox("Forma de pagamento",
-                             ["CHEQUE - EMPRESA", "CHEQUE - CLIENTE/TERCEIROS",
-                              "BOLETO", "PIX", "CARTÃO", "DINHEIRO"])
-        descricao = st.text_input("Descrição", value="")
+    c1.metric("Limite mensal (média 6m de pagamentos)", brl(media_6m))
+    c2.metric("Comprometido/mês (parcelas próx. 3 meses)", brl(comprometido_mensal),
+              help=f"Total a pagar nos próximos 3 meses: {brl(comprometido_3m)}")
+    c3.metric("Limite disponível/mês", brl(limite_disponivel))
 
-    cga, cgb = st.columns([1, 1])
-    gerar = cga.button("➕ Gerar parcelas", type="primary",
-                       use_container_width=True)
-    limpar = cgb.button("🗑️ Limpar lançamentos da sessão",
-                        use_container_width=True)
-    if limpar:
-        st.session_state["novas_parcelas"] = []
-        st.rerun()
-
-    if gerar:
-        if not fornecedor.strip():
-            st.warning("Informe o fornecedor antes de gerar.")
-        elif valor_total <= 0:
-            st.warning("Informe um valor total maior que zero.")
-        else:
-            vparc = round(valor_total / nparc, 2)
-            base_dt = pd.Timestamp(data1)
-            for i in range(int(nparc)):
-                venc = base_dt + pd.DateOffset(months=i)
-                st.session_state["novas_parcelas"].append({
-                    "Parcela": f"{i+1}/{int(nparc)}",
-                    "Fornecedor": fornecedor.strip(),
-                    "Vencimento": venc,
-                    "Parcelas": int(nparc),
-                    "Forma de Pagamento": forma,
-                    "Valor": vparc,
-                    "Descrição": descricao.strip(),
-                    "Status": "A PAGAR",
-                })
-            st.success(f"{int(nparc)} parcela(s) de {brl(vparc)} geradas "
-                       f"para {fornecedor.strip()}.")
-
-    novas = pd.DataFrame(st.session_state["novas_parcelas"])
-
-    # ---- parcelas geradas nesta sessão ----
-    if not novas.empty:
-        st.subheader("Parcelas geradas nesta sessão")
-        show_novas = novas.copy()
-        show_novas["Vencimento"] = pd.to_datetime(show_novas["Vencimento"]).dt.strftime("%d/%m/%Y")
-        show_novas["Valor"] = show_novas["Valor"].apply(brl)
-        st.dataframe(show_novas, use_container_width=True, hide_index=True)
-        csv = novas.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("⬇️ Baixar parcelas geradas (CSV)", csv,
-                           file_name="parcelas_geradas.csv", mime="text/csv")
+    if limite_disponivel <= 0:
+        st.error(f"⛔ LIMITE JÁ ATINGIDO — as parcelas dos próximos 3 meses "
+                 f"({brl(comprometido_mensal)}/mês) já consomem toda a média de "
+                 f"pagamentos dos últimos 6 meses ({brl(media_6m)}/mês). "
+                 f"Excedente: {brl(-limite_disponivel)}/mês.")
+    else:
+        st.success(f"Há {brl(limite_disponivel)}/mês de folga para novas compras.")
 
     st.divider()
 
-    # ---- dashboard: totais por mês (base + novas) ----
-    st.subheader("Dashboard — Resumo de contas a pagar")
-    df_dash = base[["Fornecedor", "Vencimento", "Valor"]].copy()
-    if not novas.empty:
-        df_dash = pd.concat([df_dash,
-                             novas[["Fornecedor", "Vencimento", "Valor"]]],
-                            ignore_index=True)
-    if df_dash.empty:
-        st.info("Nenhuma conta a pagar na base. Lance uma compra acima.")
+    # ---- simulação de nova compra parcelada ----
+    st.subheader("Simular nova compra")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        fornecedor = st.text_input("Fornecedor (opcional)")
+        valor_total = st.number_input("Valor total da compra (R$)",
+                                      min_value=0.0, value=10000.0, step=500.0)
+    with s2:
+        data1 = st.date_input("Data da 1ª parcela", value=hoje)
+        nparc = st.number_input("Nº de parcelas", min_value=1, max_value=60,
+                                value=3, step=1)
+    with s3:
+        forma = st.selectbox("Forma de pagamento",
+                             ["CHEQUE - EMPRESA", "CHEQUE - CLIENTE/TERCEIROS",
+                              "BOLETO", "PIX", "CARTÃO", "DINHEIRO"])
+        descricao = st.text_input("Descrição (opcional)")
+
+    vparc = round(valor_total / nparc, 2) if nparc else 0.0
+
+    # gerar cronograma de parcelas (lógica EDATE: vencimento mês a mês)
+    base_dt = pd.Timestamp(data1)
+    parcelas = []
+    for i in range(int(nparc)):
+        venc = base_dt + pd.DateOffset(months=i)
+        parcelas.append({"Parcela": f"{i+1}/{int(nparc)}",
+                         "Fornecedor": fornecedor.strip() or "-",
+                         "Vencimento": venc,
+                         "Forma de Pagamento": forma,
+                         "Valor": vparc,
+                         "Descrição": descricao.strip() or "-",
+                         "Status": "SIMULAÇÃO"})
+    df_parc = pd.DataFrame(parcelas)
+
+    # ---- veredito ----
+    st.subheader("Resultado da simulação")
+    r1, r2 = st.columns(2)
+    r1.metric("Valor da parcela mensal", brl(vparc))
+    r2.metric("Limite disponível/mês", brl(limite_disponivel))
+
+    if limite_disponivel <= 0:
+        st.error(f"❌ NÃO RECOMENDADO — o limite já está estourado em "
+                 f"{brl(-limite_disponivel)}/mês antes mesmo desta compra.")
+    elif vparc <= limite_disponivel:
+        st.success(f"✅ APROVADO — a parcela de {brl(vparc)} cabe no limite "
+                   f"disponível. Folga restante: {brl(limite_disponivel - vparc)}/mês.")
     else:
-        df_dash["Vencimento"] = pd.to_datetime(df_dash["Vencimento"])
-        df_dash["Mes"] = df_dash["Vencimento"].dt.strftime("%m/%Y")
-        df_dash["MesOrd"] = (df_dash["Vencimento"].dt.year * 100
-                             + df_dash["Vencimento"].dt.month)
-        tot_geral = df_dash["Valor"].sum()
-        st.metric("TOTAL GERAL A PAGAR", brl(tot_geral))
-        piv = (df_dash.groupby(["MesOrd", "Mes"])["Valor"].sum()
-               .reset_index().sort_values("MesOrd"))
-        cols = st.columns(min(6, max(1, len(piv))))
-        for i, (_, row) in enumerate(piv.iterrows()):
-            cols[i % len(cols)].metric(f"Total {row['Mes']}", brl(row["Valor"]))
-        st.bar_chart(piv.set_index("Mes")["Valor"])
+        st.error(f"❌ NÃO RECOMENDADO — a parcela de {brl(vparc)} ultrapassa o "
+                 f"limite disponível em {brl(vparc - limite_disponivel)}/mês.")
 
-        # tabela completa de contas a pagar
-        with st.expander("Ver todas as contas a pagar (base + novas)"):
-            full = base.copy()
-            if not novas.empty:
-                add = novas.rename(columns={"Parcela": "Parc."})
-                full = pd.concat([full, add[["Fornecedor", "Vencimento", "Parcelas",
-                                             "Forma de Pagamento", "Valor",
-                                             "Descrição", "Status"]]],
-                                 ignore_index=True)
-            full = full.sort_values("Vencimento")
-            full["Vencimento"] = pd.to_datetime(full["Vencimento"]).dt.strftime("%d/%m/%Y")
-            full["Valor"] = full["Valor"].apply(brl)
-            st.dataframe(full, use_container_width=True, hide_index=True)
+    # cronograma gerado
+    with st.expander("Ver cronograma das parcelas simuladas"):
+        show = df_parc.copy()
+        show["Vencimento"] = show["Vencimento"].dt.strftime("%d/%m/%Y")
+        show["Valor"] = show["Valor"].apply(brl)
+        st.dataframe(show, use_container_width=True, hide_index=True)
+        csv = df_parc.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ Baixar cronograma (CSV)", csv,
+                           file_name="parcelas_simuladas.csv", mime="text/csv")
 
-    st.caption("As novas parcelas valem só nesta sessão (o app não grava no Excel). "
-               "Use o botão de download para salvar e colar na aba 'Contas a Pagar'.")
+    # ---- dashboard: compromissos por mês (existentes + simulação) ----
+    st.divider()
+    st.subheader("Contas a pagar por mês (próximos meses + simulação)")
+    horizonte = hoje + pd.DateOffset(months=12)
+    fut = contas[(contas["Vencimento"] >= hoje) &
+                 (contas["Vencimento"] < horizonte)][["Vencimento", "Valor"]].copy()
+    fut["Origem"] = "Já comprometido"
+    sim = df_parc[["Vencimento", "Valor"]].copy()
+    sim["Origem"] = "Nova compra (simulação)"
+    tudo = pd.concat([fut, sim], ignore_index=True)
+    tudo["Mes"] = tudo["Vencimento"].dt.strftime("%m/%Y")
+    tudo["MesOrd"] = tudo["Vencimento"].dt.year * 100 + tudo["Vencimento"].dt.month
+    piv = (tudo.pivot_table(index=["MesOrd", "Mes"], columns="Origem",
+                            values="Valor", aggfunc="sum", fill_value=0)
+           .reset_index().sort_values("MesOrd"))
+    piv = piv.drop(columns=["MesOrd"]).set_index("Mes")
+    st.bar_chart(piv)
+    pivf = piv.copy()
+    for c in pivf.columns:
+        pivf[c] = pivf[c].apply(brl)
+    st.dataframe(pivf, use_container_width=True)
+    st.caption(f"Linha de referência: limite mensal = {brl(media_6m)} "
+               f"(média paga nos últimos 6 meses).")
 
 elif aba == "Régua de Crédito":
     st.header("Régua de Crédito")
