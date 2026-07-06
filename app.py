@@ -374,9 +374,11 @@ elif aba == "DRE Gerencial":
     st.dataframe(fmt.style.apply(realcar, axis=1), use_container_width=True,
                  hide_index=True, height=min(640, 40 + 35 * len(fmt)))
 
-    if mostrar_ah:
+    if mostrar_ah and len(meses_f) >= 2:
         st.caption(f"AH% = variação percentual de {meses_f[-1]} em relação a {meses_f[-2]}. "
                    f"Verde/+ subiu, vermelho/- caiu.")
+    elif mostrar_ah:
+        st.caption("AH% precisa de pelo menos 2 meses selecionados no filtro.")
     if mostrar_av:
         st.caption("AV% = peso de cada linha sobre a Receita Bruta total do período "
                    "(análise vertical).")
