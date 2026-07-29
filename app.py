@@ -58,6 +58,21 @@ TAXAS = [("Simples Nacional (10,47% s/ Vendas)", 0.1047),
 
 # ----------------- Leitura e preparo dos dados -----------------
 @st.cache_data
+def normaliza_cc(v):
+    """Extrai o centro de custo (CDK, CODI, VAREN, ALV) da coluna CONTA."""
+    if v is None:
+        return "CODI"
+    c = str(v).strip().upper()
+    if c in ("", "NAN"):
+        return "CODI"
+    if "CODI.COM" in c or "LOJA BASIC" in c or "CONTA-CAIXA" in c:
+        return "CODI"
+    for cc in ["CDK", "CODI", "VAREN", "ALV"]:
+        if cc in c:
+            return cc
+    return c
+
+
 def carregar_aba(caminho, aba):
     """Lê uma aba de lançamentos e normaliza."""
     df = pd.read_excel(caminho, sheet_name=aba, skiprows=4)
@@ -69,6 +84,10 @@ def carregar_aba(caminho, aba):
     df["MesK"] = df["Data"].dt.strftime("%m/%Y")
     df["MesOrd"] = df["Data"].dt.year * 100 + df["Data"].dt.month
     df["Categoria"] = df["Categoria"].astype(str).str.strip()
+    if "Centro de Custo" in df.columns:
+        df["CentroCusto"] = df["Centro de Custo"].apply(normaliza_cc)
+    else:
+        df["CentroCusto"] = "CODI"
     return df
 
 
@@ -105,26 +124,33 @@ if not caminho.exists():
 
 df_dre = carregar_aba(ARQUIVO, "Lançamentos DRE")      # competência (vencimento)
 df_flux = carregar_aba(ARQUIVO, "Lançamentos Fluxo")    # caixa (baixa)
-
-# CMV reaproveitado entra na base DRE se não houver categoria CMV
-# (já vem nas duas abas conforme gerado no Excel)
-
-receita = df_dre[df_dre["Tipo"] == "Entrada"]      # para DRE
-despesa = df_dre[df_dre["Tipo"] == "Saída"]
-receita_fx = df_flux[df_flux["Tipo"] == "Entrada"]  # para Fluxo
-despesa_fx = df_flux[df_flux["Tipo"] == "Saída"]
 meses = meses_ordenados(df_dre)
 
-# Sidebar - filtro de período
+# Sidebar - filtros
 st.sidebar.header("Filtros")
 sel = st.sidebar.multiselect("Meses", meses, default=meses)
+
+# filtro de centro de custo (afeta DRE e Fluxo)
+ccs = sorted(set(df_dre["CentroCusto"]) | set(df_flux["CentroCusto"]))
+cc_sel = st.sidebar.multiselect("Centro de custo", ccs, default=ccs,
+                                help="CDK, CODI, VAREN, ALV. O histórico está marcado como CODI.")
+
+# aplica centro de custo primeiro
+df_dre_cc = df_dre[df_dre["CentroCusto"].isin(cc_sel)] if cc_sel else df_dre
+df_flux_cc = df_flux[df_flux["CentroCusto"].isin(cc_sel)] if cc_sel else df_flux
+
+receita = df_dre_cc[df_dre_cc["Tipo"] == "Entrada"]
+despesa = df_dre_cc[df_dre_cc["Tipo"] == "Saída"]
+receita_fx = df_flux_cc[df_flux_cc["Tipo"] == "Entrada"]
+despesa_fx = df_flux_cc[df_flux_cc["Tipo"] == "Saída"]
+
 if sel:
-    df_f = df_dre[df_dre["MesK"].isin(sel)]
+    df_f = df_dre_cc[df_dre_cc["MesK"].isin(sel)]
     rec_f = receita[receita["MesK"].isin(sel)]
     desp_f = despesa[despesa["MesK"].isin(sel)]
     meses_f = [m for m in meses if m in sel]
 else:
-    df_f, rec_f, desp_f, meses_f = df_dre, receita, despesa, meses
+    df_f, rec_f, desp_f, meses_f = df_dre_cc, receita, despesa, meses
 
 aba = st.sidebar.radio("Seção", ["Resumo", "Fluxo de Caixa", "DRE Gerencial",
                                   "Simulador de Compra", "Régua de Crédito"])
