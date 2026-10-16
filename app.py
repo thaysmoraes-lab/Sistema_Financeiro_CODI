@@ -152,7 +152,14 @@ else:
     df_f, rec_f, desp_f, meses_f = df_dre_cc, receita, despesa, meses
 
 aba = st.sidebar.radio("Seção", ["Resumo", "Fluxo de Caixa", "DRE Gerencial",
+                                  "Painel Comercial", "OS de Produção",
                                   "Simulador de Compra", "Régua de Crédito"])
+
+
+# ----------------- helpers dos painéis -----------------
+def dias_uteis(ini, fim, ano, mes):
+    import datetime as _dt
+    return sum(1 for d in range(ini, fim + 1) if _dt.date(ano, mes, d).weekday() < 5)
 
 # ============ RESUMO ============
 if aba == "Resumo":
@@ -407,6 +414,160 @@ elif aba == "DRE Gerencial":
     if mostrar_av:
         st.caption("AV% = peso de cada linha sobre a Receita Bruta total do período "
                    "(análise vertical).")
+
+# ============ PAINEL COMERCIAL (metas × realizado) ============
+elif aba == "Painel Comercial":
+    st.header("Painel Comercial — Metas × Realizado 2026")
+
+    @st.cache_data
+    def carregar_metas(caminho):
+        try:
+            dfm = pd.read_excel(caminho, sheet_name="Metas", skiprows=4)
+            dfm.columns = [str(c).strip() for c in dfm.columns]
+            col_mes = [c for c in dfm.columns if "Mês" in c or "Mes" in c][0]
+            col_meta = [c for c in dfm.columns if "Meta" in c][0]
+            dfm = dfm.dropna(subset=[col_mes, col_meta])
+            dfm["Meta"] = pd.to_numeric(dfm[col_meta], errors="coerce").fillna(0)
+            return dict(zip(dfm[col_mes].astype(str).str.strip(), dfm["Meta"]))
+        except Exception:
+            return {}
+
+    metas = carregar_metas(ARQUIVO)
+    if not metas:
+        st.warning("Aba 'Metas' não encontrada no Excel. Adicione as metas mensais nela.")
+    else:
+        # realizado por mês = receita (Entrada) da DRE
+        real = {m: receita[receita["MesK"] == m]["Valor"].sum() for m in metas}
+        # mês atual (parcial): último mês com realizado < meta e data no mês corrente
+        hoje = pd.Timestamp.today().normalize()
+        mes_atual = hoje.strftime("%m/%Y")
+
+        linhas = []
+        for mk in sorted(metas, key=lambda x: (int(x.split("/")[1]), int(x.split("/")[0]))):
+            meta = metas[mk]
+            rz = real.get(mk, 0.0)
+            parcial = (mk == mes_atual)
+            linhas.append({"mes": mk, "meta": meta, "real": rz, "parcial": parcial})
+
+        # projeção do mês atual por dias úteis
+        proj_atual = None
+        if mes_atual in metas:
+            import calendar
+            ano, mes = int(mes_atual.split("/")[1]), int(mes_atual.split("/")[0])
+            dias_mes = calendar.monthrange(ano, mes)[1]
+            corte = hoje.day
+            u_dec = dias_uteis(1, corte, ano, mes)
+            u_tot = dias_uteis(1, dias_mes, ano, mes)
+            real_atual = real.get(mes_atual, 0.0)
+            if u_dec > 0 and real_atual > 0:
+                proj_atual = real_atual / u_dec * u_tot
+
+        # KPIs acumulados (meses fechados = não parciais e com realizado > 0)
+        fechados = [l for l in linhas if not l["parcial"] and l["real"] > 0]
+        acc_meta = sum(l["meta"] for l in fechados)
+        acc_real = sum(l["real"] for l in fechados)
+        acc_pct = acc_real / acc_meta * 100 if acc_meta else 0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Meta acum. (fechados)", brl(acc_meta))
+        c2.metric("Realizado acum.", brl(acc_real),
+                  delta=brl(acc_real - acc_meta))
+        c3.metric("Atingimento acum.", f"{acc_pct:.1f}%")
+        if proj_atual is not None:
+            c4.metric(f"Projeção {mes_atual}", brl(proj_atual),
+                      delta=f"{proj_atual / metas[mes_atual] * 100:.1f}% da meta")
+
+        # gráfico meta × realizado
+        st.subheader("Meta × Realizado por mês")
+        graf = pd.DataFrame({
+            "Meta": {l["mes"]: l["meta"] for l in linhas},
+            "Realizado": {l["mes"]: (proj_atual if (l["parcial"] and proj_atual) else l["real"]) for l in linhas},
+        })
+        st.bar_chart(graf)
+        if proj_atual is not None:
+            st.caption(f"Obs.: {mes_atual} mostra a PROJEÇÃO ({brl(proj_atual)}), "
+                       f"pois o mês ainda está em andamento.")
+
+        # tabela detalhada
+        st.subheader("Detalhamento mensal")
+        rows = []
+        for l in linhas:
+            real_mostrar = l["real"]
+            p = real_mostrar / l["meta"] * 100 if l["meta"] else 0
+            status = "🟢" if p >= 100 else "🟡" if p >= 85 else "🔴"
+            rows.append({
+                "Mês": l["mes"] + (" (parcial)" if l["parcial"] else ""),
+                "Meta": brl(l["meta"]),
+                "Realizado": brl(real_mostrar),
+                "Diferença": brl(real_mostrar - l["meta"]),
+                "Atingimento": f"{status} {p:.1f}%",
+            })
+        if proj_atual is not None:
+            pp = proj_atual / metas[mes_atual] * 100
+            rows.append({
+                "Mês": f"{mes_atual} (projeção)", "Meta": brl(metas[mes_atual]),
+                "Realizado": brl(proj_atual), "Diferença": brl(proj_atual - metas[mes_atual]),
+                "Atingimento": f"{'🟢' if pp>=100 else '🟡' if pp>=85 else '🔴'} {pp:.1f}%",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("Atingimento: 🟢 ≥100% · 🟡 85–99% · 🔴 <85%. "
+                   "Projeção do mês atual pelo ritmo de dias úteis.")
+
+# ============ OS DE PRODUÇÃO ============
+elif aba == "OS de Produção":
+    st.header("OS de Produção — Acompanhamento")
+
+    @st.cache_data
+    def carregar_os(caminho):
+        try:
+            dfo = pd.read_excel(caminho, sheet_name="OS Produção", skiprows=4)
+            dfo.columns = [str(c).strip() for c in dfo.columns]
+            return dfo
+        except Exception:
+            return pd.DataFrame()
+
+    osdf = carregar_os(ARQUIVO)
+    if osdf.empty:
+        st.warning("Aba 'OS Produção' não encontrada no Excel.")
+    else:
+        for col in ["Qtd Total", "Qtd Retorno", "Qtd Falta", "Valor Total", "Pago", "A Pagar"]:
+            if col in osdf.columns:
+                osdf[col] = pd.to_numeric(osdf[col], errors="coerce").fillna(0)
+        osdf["Emissão"] = pd.to_datetime(osdf["Emissão"], errors="coerce")
+
+        # em aberto = falta retornar OU falta pagar
+        aberto = osdf[(osdf["Qtd Falta"] > 0) | (osdf["A Pagar"] > 0.01)].copy()
+        hoje = pd.Timestamp.today().normalize()
+        aberto["Dias"] = (hoje - aberto["Emissão"]).dt.days
+
+        def pend(r):
+            f = r["Qtd Falta"] > 0; p = r["A Pagar"] > 0.01
+            return "Produção + Pagto" if (f and p) else ("Falta retornar" if f else "Falta pagar")
+        aberto["Pendência"] = aberto.apply(pend, axis=1)
+        aberto = aberto.sort_values("Dias", ascending=False)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("OS em aberto", len(aberto))
+        c2.metric("Peças a retornar", int(aberto["Qtd Falta"].sum()))
+        c3.metric("Valor a pagar", brl(aberto["A Pagar"].sum()))
+        c4.metric("OS mais antiga", f"{int(aberto['Dias'].max()) if len(aberto) else 0} dias")
+
+        st.subheader("Tempo em aberto por OS (aging)")
+        aging = aberto.set_index(aberto["O.S."].astype(str))["Dias"]
+        st.bar_chart(aging)
+        st.caption("Aging = dias desde a emissão. Quanto maior, mais atrasada.")
+
+        st.subheader("Ordens de serviço em aberto")
+        show = aberto[["O.S.", "Fornecedor", "Produto", "Emissão", "Qtd Total",
+                       "Qtd Retorno", "Qtd Falta", "Valor Total", "A Pagar",
+                       "Pendência", "Dias"]].copy()
+        show["Emissão"] = show["Emissão"].dt.strftime("%d/%m/%Y")
+        for col in ["Valor Total", "A Pagar"]:
+            show[col] = show[col].apply(brl)
+        show = show.rename(columns={"Dias": "Aging (dias)"})
+        st.dataframe(show, use_container_width=True, hide_index=True)
+        st.caption(f"Total de OS na base: {len(osdf)} · concluídas: {len(osdf) - len(aberto)} · "
+                   f"em aberto: {len(aberto)}. OS em aberto = falta retornar peças ou falta pagar.")
 
 # ============ SIMULADOR DE COMPRA ============
 elif aba == "Simulador de Compra":
