@@ -41,8 +41,7 @@ ARQUIVO = "sistema_financeiro.xlsx"
 
 # ----------------- Classificação da DRE gerencial -----------------
 CUSTO = ["Custo de Mercadoria Vendida"]
-OPER = ["Criação de Modelos", "Etiquetas", "Frete e Transporte de Mercadorias",
-        "Embalagens", "Manutenção de Máquinas e Peças"]
+OPER = ["Frete e Transporte de Mercadorias", "Manutenção de Máquinas e Peças"]
 PESSOAL = ["Salário e Ordenados", "13º Salário", "Acertos e Recisões", "Férias", "Fgts, Gps e Pis", "Vale Transporte",
            "Vales e Adiantamentos", "Premiações e Abonos", "Exame Adminissional/Demissional",
            "Uniforme e EPIs", "Despesa com Sindicatos"]
