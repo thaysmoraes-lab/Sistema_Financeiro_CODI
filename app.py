@@ -421,14 +421,24 @@ elif aba == "Painel Comercial":
 
     @st.cache_data
     def carregar_metas(caminho):
+        """Retorna {mês: {'meta', 'parcial', 'corte'}}. Parcial/corte só no mês em andamento."""
         try:
             dfm = pd.read_excel(caminho, sheet_name="Metas", skiprows=4)
             dfm.columns = [str(c).strip() for c in dfm.columns]
             col_mes = [c for c in dfm.columns if "Mês" in c or "Mes" in c][0]
-            col_meta = [c for c in dfm.columns if "Meta" in c][0]
+            col_meta = [c for c in dfm.columns if c.startswith("Meta")][0]
+            col_parc = next((c for c in dfm.columns if "Parcial" in c), None)
+            col_corte = next((c for c in dfm.columns if "Corte" in c), None)
             dfm = dfm.dropna(subset=[col_mes, col_meta])
-            dfm["Meta"] = pd.to_numeric(dfm[col_meta], errors="coerce").fillna(0)
-            return dict(zip(dfm[col_mes].astype(str).str.strip(), dfm["Meta"]))
+            out = {}
+            for _, r in dfm.iterrows():
+                mk = str(r[col_mes]).strip()
+                out[mk] = {
+                    "meta": pd.to_numeric(r[col_meta], errors="coerce"),
+                    "parcial": pd.to_numeric(r[col_parc], errors="coerce") if col_parc else None,
+                    "corte": pd.to_numeric(r[col_corte], errors="coerce") if col_corte else None,
+                }
+            return out
         except Exception:
             return {}
 
@@ -436,82 +446,103 @@ elif aba == "Painel Comercial":
     if not metas:
         st.warning("Aba 'Metas' não encontrada no Excel. Adicione as metas mensais nela.")
     else:
-        # realizado por mês = receita (Entrada) da DRE
-        real = {m: receita[receita["MesK"] == m]["Valor"].sum() for m in metas}
-        # mês atual (parcial): último mês com realizado < meta e data no mês corrente
-        hoje = pd.Timestamp.today().normalize()
-        mes_atual = hoje.strftime("%m/%Y")
+        import calendar
+        # realizado fechado por mês = receita (Entrada) da DRE
+        real_dre = {m: receita[receita["MesK"] == m]["Valor"].sum() for m in metas}
 
+        def projeta(mk, parcial, corte):
+            """Projeta o fechamento do mês pelo ritmo de dias úteis."""
+            ano, mes = int(mk.split("/")[1]), int(mk.split("/")[0])
+            dias_mes = calendar.monthrange(ano, mes)[1]
+            c = int(corte) if (corte and not pd.isna(corte)) else dias_mes
+            u_dec = dias_uteis(1, c, ano, mes)
+            u_tot = dias_uteis(1, dias_mes, ano, mes)
+            return parcial / u_dec * u_tot if u_dec > 0 else parcial
+
+        # monta linhas; mês com "parcial" preenchido é o mês em andamento
         linhas = []
         for mk in sorted(metas, key=lambda x: (int(x.split("/")[1]), int(x.split("/")[0]))):
-            meta = metas[mk]
-            rz = real.get(mk, 0.0)
-            parcial = (mk == mes_atual)
-            linhas.append({"mes": mk, "meta": meta, "real": rz, "parcial": parcial})
+            meta = metas[mk]["meta"]
+            parcial = metas[mk]["parcial"]
+            corte = metas[mk]["corte"]
+            em_andamento = parcial is not None and not pd.isna(parcial)
+            if em_andamento:
+                proj = projeta(mk, parcial, corte)
+                linhas.append({"mes": mk, "meta": meta, "real": parcial, "proj": proj,
+                               "corte": corte, "andamento": True})
+            else:
+                linhas.append({"mes": mk, "meta": meta, "real": real_dre.get(mk, 0.0),
+                               "proj": None, "corte": None, "andamento": False})
 
-        # projeção do mês atual por dias úteis
-        proj_atual = None
-        if mes_atual in metas:
-            import calendar
-            ano, mes = int(mes_atual.split("/")[1]), int(mes_atual.split("/")[0])
-            dias_mes = calendar.monthrange(ano, mes)[1]
-            corte = hoje.day
-            u_dec = dias_uteis(1, corte, ano, mes)
-            u_tot = dias_uteis(1, dias_mes, ano, mes)
-            real_atual = real.get(mes_atual, 0.0)
-            if u_dec > 0 and real_atual > 0:
-                proj_atual = real_atual / u_dec * u_tot
+        # ---- aplica o filtro de MESES da barra lateral ----
+        if sel:
+            linhas = [l for l in linhas if l["mes"] in sel]
+        if not linhas:
+            st.info("Nenhum mês selecionado no filtro.")
+            st.stop()
 
-        # KPIs acumulados (meses fechados = não parciais e com realizado > 0)
-        fechados = [l for l in linhas if not l["parcial"] and l["real"] > 0]
+        # KPIs acumulados: meses fechados (não em andamento, com realizado > 0)
+        fechados = [l for l in linhas if not l["andamento"] and l["real"] > 0]
         acc_meta = sum(l["meta"] for l in fechados)
         acc_real = sum(l["real"] for l in fechados)
         acc_pct = acc_real / acc_meta * 100 if acc_meta else 0
+        mes_atual = next((l for l in linhas if l["andamento"]), None)
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Meta acum. (fechados)", brl(acc_meta))
-        c2.metric("Realizado acum.", brl(acc_real),
-                  delta=brl(acc_real - acc_meta))
+        c2.metric("Realizado acum.", brl(acc_real), delta=brl(acc_real - acc_meta))
         c3.metric("Atingimento acum.", f"{acc_pct:.1f}%")
-        if proj_atual is not None:
-            c4.metric(f"Projeção {mes_atual}", brl(proj_atual),
-                      delta=f"{proj_atual / metas[mes_atual] * 100:.1f}% da meta")
+        if mes_atual:
+            c4.metric(f"Projeção {mes_atual['mes']}", brl(mes_atual["proj"]),
+                      delta=f"{mes_atual['proj'] / mes_atual['meta'] * 100:.1f}% da meta")
 
-        # gráfico meta × realizado
+        # gráfico meta × realizado (mês em andamento mostra a projeção)
         st.subheader("Meta × Realizado por mês")
         graf = pd.DataFrame({
             "Meta": {l["mes"]: l["meta"] for l in linhas},
-            "Realizado": {l["mes"]: (proj_atual if (l["parcial"] and proj_atual) else l["real"]) for l in linhas},
+            "Realizado": {l["mes"]: (l["proj"] if l["andamento"] else l["real"]) for l in linhas},
         })
         st.bar_chart(graf)
-        if proj_atual is not None:
-            st.caption(f"Obs.: {mes_atual} mostra a PROJEÇÃO ({brl(proj_atual)}), "
-                       f"pois o mês ainda está em andamento.")
+        if mes_atual:
+            st.caption(f"Obs.: {mes_atual['mes']} mostra a PROJEÇÃO ({brl(mes_atual['proj'])}) "
+                       f"pelo ritmo de vendas; o mês ainda está em andamento "
+                       f"(parcial de {brl(mes_atual['real'])} até o dia {int(mes_atual['corte'])}).")
 
         # tabela detalhada
         st.subheader("Detalhamento mensal")
         rows = []
         for l in linhas:
-            real_mostrar = l["real"]
-            p = real_mostrar / l["meta"] * 100 if l["meta"] else 0
-            status = "🟢" if p >= 100 else "🟡" if p >= 85 else "🔴"
-            rows.append({
-                "Mês": l["mes"] + (" (parcial)" if l["parcial"] else ""),
-                "Meta": brl(l["meta"]),
-                "Realizado": brl(real_mostrar),
-                "Diferença": brl(real_mostrar - l["meta"]),
-                "Atingimento": f"{status} {p:.1f}%",
-            })
-        if proj_atual is not None:
-            pp = proj_atual / metas[mes_atual] * 100
-            rows.append({
-                "Mês": f"{mes_atual} (projeção)", "Meta": brl(metas[mes_atual]),
-                "Realizado": brl(proj_atual), "Diferença": brl(proj_atual - metas[mes_atual]),
-                "Atingimento": f"{'🟢' if pp>=100 else '🟡' if pp>=85 else '🔴'} {pp:.1f}%",
-            })
+            if l["andamento"]:
+                # linha parcial
+                p_par = l["real"] / l["meta"] * 100 if l["meta"] else 0
+                s_par = "🟢" if p_par >= 100 else "🟡" if p_par >= 85 else "🔴"
+                rows.append({
+                    "Mês": f"{l['mes']} (parcial até dia {int(l['corte'])})",
+                    "Meta": brl(l["meta"]), "Realizado": brl(l["real"]),
+                    "Diferença": brl(l["real"] - l["meta"]),
+                    "Atingimento": f"{s_par} {p_par:.1f}%",
+                })
+                # linha projeção
+                p_proj = l["proj"] / l["meta"] * 100 if l["meta"] else 0
+                s_proj = "🟢" if p_proj >= 100 else "🟡" if p_proj >= 85 else "🔴"
+                rows.append({
+                    "Mês": f"{l['mes']} (PROJEÇÃO)",
+                    "Meta": brl(l["meta"]), "Realizado": brl(l["proj"]),
+                    "Diferença": brl(l["proj"] - l["meta"]),
+                    "Atingimento": f"{s_proj} {p_proj:.1f}%",
+                })
+            else:
+                p = l["real"] / l["meta"] * 100 if l["meta"] else 0
+                status = "🟢" if p >= 100 else "🟡" if p >= 85 else "🔴"
+                rows.append({
+                    "Mês": l["mes"], "Meta": brl(l["meta"]), "Realizado": brl(l["real"]),
+                    "Diferença": brl(l["real"] - l["meta"]),
+                    "Atingimento": f"{status} {p:.1f}%",
+                })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.caption("Atingimento: 🟢 ≥100% · 🟡 85–99% · 🔴 <85%. "
-                   "Projeção do mês atual pelo ritmo de dias úteis.")
+                   "Projeção do mês em andamento pelo ritmo de dias úteis. "
+                   "O filtro de meses da barra lateral se aplica a este painel.")
 
 # ============ OS DE PRODUÇÃO ============
 elif aba == "OS de Produção":
